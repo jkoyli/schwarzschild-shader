@@ -1,0 +1,44 @@
+﻿# ── 运行产物 ──────────────────────────────────────────────────────────────
+# 中间迭代图（post2~post9 那一串）不入库，只保留最终成果图。
+cpu/out/*.png
+!cpu/out/post8.png
+!cpu/out/ripple_sequence.png
+!cpu/out/ripple_last.png
+!cpu/out/post9_ripple.png
+!cpu/out/blackhole_exposure1.png
+
+# 线性 HDR 浮点数据（2.3 MB，可重新渲染生成）：
+#   cd cpu && python render.py
+# 想省一次 4 分钟渲染的话，本地留着即可，不必提交。
+cpu/out/*.npy
+
+# 无头验证的输出图（每次跑都会重新生成）
+web/out/
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── Node ──────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+
+# ── 编辑器 / 系统 ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+desktop.ini
+
+# ── 临时文件 ──────────────────────────────────────────────────────────────
+*.tmp
+*.bak
+*~
+
+# ── Markdown 文档：本地保留，不入库（用户明确要求"md 一律不发"）─────────────
+# 这两个文件仍在工作目录里，只是不提交。
+*.md

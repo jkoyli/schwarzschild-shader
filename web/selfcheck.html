@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WebGL2 着色器自检</title>
+<style>
+  body { margin:0; background:#08090c; color:#d8dee9;
+         font:13px/1.6 ui-monospace, Consolas, monospace; }
+  canvas { width: 480px; height: 300px; display: block; }
+  #result { padding: 10px; white-space: pre-wrap; }
+  pre { margin: 0; }
+</style>
+</head>
+<body>
+<!--
+  自检页面 —— 和 index.html 用**同一份着色器源码**（从 index.html 里抽出来的由
+  headless_verify.js 注入，避免两份拷贝不同步），但只做最小的渲染循环，
+  然后把结果写成 JSON 放在 #result 上，供无头浏览器 --dump-dom 捞取。
+
+  为什么要单独一个页面而不是直接测 index.html：
+  index.html 有完整 UI（滑块、面板），无头环境下那些交互没有意义，
+  而且它的渲染循环是持续 rAF 的 —— --dump-dom 抓到的时机会不确定。
+  这个页面跑固定 10 帧就停，结果确定、可判读。
+-->
+<div id="result" data-status="running">running</div>
+<!--
+  【为什么画布这么小、步数这么低】
+  这个页面在无头模式下走 SwiftShader **软件渲染**，速度比真 GPU 慢几个数量级。
+  第一版用 240×150 × 160 步 × 10 帧，超出了无头浏览器的虚拟时间预算，
+  页面没跑完就被 --dump-dom 抓走了（status 停在 running）。
+  降到 96×64 × 100 步 × 3 帧：验证目标（编译/链接/FBO/WebGL 调用合法性/非全黑）
+  一个都不少，但能跑完。**画质不是这里要验证的东西。**
+-->
+<canvas id="c" width="96" height="64"></canvas>
+
+<script>
+"use strict";
+// ── 即时诊断 ──────────────────────────────────────────────────────────────
+// 无头环境里拿不到 console，所以每一步都直接写进 DOM：
+// 万一后面某处卡住或抛错，至少能看到"卡在哪一步"。
+// （第一版没有这个，结果只看到 status 停在 running，完全不知道卡在哪。）
+const diag = [];
+function mark(s) {
+  diag.push(s);
+  const el = document.getElementById('result');
+  if (el) el.textContent = 'DIAG ' + JSON.stringify(diag);
+}
+mark('script-start');
+
+// 占位符由 headless_verify.js 在运行时替换成从 index.html 抽出的真实着色器源码。
+// ⚠ 注意：这里的注释**不能**再写出那个占位符的字面量 ——
+// headless_verify.js 用的是 String.replace(字符串, ...)，它**只替换第一次出现**。
+// 我第一版把占位符名字也写进了注释，结果替换命中了注释、代码里仍是未定义标识符，
+// 表现为 "Uncaught ReferenceError: __SHADER_SOURCE__ is not defined"。
+const SHADERS = __SHADER_SOURCE__;
+mark('shaders=' + Object.keys(SHADERS).map((k) => k + ':' + SHADERS[k].length).join(','));
+
+const out = {
+  hasContext: false,
+  renderer: '(未取到)',
+  glslVersion: '(未取到)',
+  mainCompiled: false, mainError: null,
+  postCompiled: false, postError: null,
+  mainLinked: false, postLinked: false,
+  fboOk: false, fboError: null,
+  framesOk: false, glError: 'none',
+  jsError: null,
+  pixelStats: null,
+  log: '',
+};
+
+function report(status) {
+  const el = document.getElementById('result');
+  el.setAttribute('data-status', status);
+  el.textContent = JSON.stringify(out);
+}
+
+window.addEventListener('error', (e) => {
+  out.jsError = String(e.message) + ' @' + e.filename + ':' + e.lineno;
+  report('error');
+});
+
+function compileWithDetail(gl, type, src, label) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  const okFlag = gl.getShaderParameter(sh, gl.COMPILE_STATUS);
+  const log = gl.getShaderInfoLog(sh) || '';
+  if (!okFlag) {
+    // 把出错行号和上下文源码一起带上 —— 这是排查 GLSL 唯一有效的手段
+    const lines = src.split('\n');
+    let ctx = '';
+    const mm = /:(\d+):/.exec(log);
+    if (mm) {
+      const n = parseInt(mm[1], 10);
+      for (let i = Math.max(0, n - 4); i < Math.min(lines.length, n + 3); i++) {
+        ctx += (i + 1 === n ? '>> ' : '   ') + (i + 1) + ': ' + lines[i] + '\n';
+      }
+    }
+    return { shader: sh, ok: false, error: '[' + label + ']\n' + log + '\n' + ctx };
+  }
+  return { shader: sh, ok: true, error: null };
+}
+
+try {
+  const canvas = document.getElementById('c');
+  mark('before-getContext');
+  const gl = canvas.getContext('webgl2', { antialias: false, depth: false });
+  mark('gotContext=' + (gl ? 'yes' : 'no'));
+
+  if (!gl) {
+    out.jsError = 'WebGL2 不可用';
+    report('error');
+  } else {
+    out.hasContext = true;
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    out.renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '(隐藏)';
+    out.glslVersion = String(gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
+
+    // ── 编译两个着色器 ──
+    const cMain = compileWithDetail(gl, gl.VERTEX_SHADER, SHADERS.VS, 'VS');
+    mark('VS compiled=' + cMain.ok);
+    out.mainCompiled = cMain.ok;
+    out.mainError = cMain.error;
+
+    const fMain = compileWithDetail(gl, gl.FRAGMENT_SHADER, SHADERS.FS_MAIN, 'FS_MAIN');
+    if (out.mainCompiled && !fMain.ok) { out.mainCompiled = false; out.mainError = fMain.error; }
+
+    const cPost = compileWithDetail(gl, gl.VERTEX_SHADER, SHADERS.VS, 'VS');
+    const fPost = compileWithDetail(gl, gl.FRAGMENT_SHADER, SHADERS.FS_POST, 'FS_POST');
+    mark('FS compiled main=' + fMain.ok + ' post=' + fPost.ok);
+    out.postCompiled = cPost.ok && fPost.ok;
+    if (!fPost.ok) out.postError = fPost.error;
+
+    // ── 链接 ──
+    let mainProg = null, postProg = null;
+    function makeProgram(vs, fs) {
+      const p = gl.createProgram();
+      gl.attachShader(p, vs); gl.attachShader(p, fs);
+      gl.linkProgram(p);
+      return p;
+    }
+    if (out.mainCompiled) {
+      mainProg = makeProgram(cMain.shader, fMain.shader);
+      out.mainLinked = !!gl.getProgramParameter(mainProg, gl.LINK_STATUS);
+      if (!out.mainLinked) out.mainError = gl.getProgramInfoLog(mainProg);
+    }
+    if (out.postCompiled) {
+      postProg = makeProgram(cPost.shader, fPost.shader);
+      out.postLinked = !!gl.getProgramParameter(postProg, gl.LINK_STATUS);
+      if (!out.postLinked) out.postError = gl.getProgramInfoLog(postProg);
+    }
+
+    // ── 浮点帧缓冲（index.html 依赖 RGBA16F）──
+    let tex = null, fb = null;
+    if (gl.getExtension('EXT_color_buffer_float') || true) {
+      tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 96, 64, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      out.fboOk = (st === gl.FRAMEBUFFER_COMPLETE);
+      if (!out.fboOk) out.fboError = 'framebuffer status = 0x' + st.toString(16);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    // ── 渲染 10 帧（用 index.html 里的真实 uniform 名）──
+    if (out.mainLinked && out.postLinked && out.fboOk) {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+
+      const U = (p, n) => gl.getUniformLocation(p, n);
+      let errs = [];
+
+      mark('render-start');
+      for (let frame = 0; frame < 3; frame++) {
+        mark('frame' + frame);
+        // pass 1 → FBO
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.viewport(0, 0, 96, 64);
+        gl.useProgram(mainProg);
+        gl.uniform2f(U(mainProg, 'uRes'), 96, 64);
+        gl.uniform1f(U(mainProg, 'uTime'), frame * 0.016);
+        gl.uniform3f(U(mainProg, 'uCamPos'), 40 * Math.cos(0.157), 40 * Math.sin(0.157), 0);
+        // 列主序 mat3：right, up, fwd
+        gl.uniformMatrix3fv(U(mainProg, 'uCamBasis'), false, new Float32Array([
+          0, 0.1564, -0.9877,
+          0, 0.9877, 0.1564,
+          -1, 0, 0,
+        ]));
+        gl.uniform1f(U(mainProg, 'uHalfW'), 0.45);
+        gl.uniform1f(U(mainProg, 'uHalfH'), 0.38);
+        gl.uniform1f(U(mainProg, 'uPixelAngle'), 0.0114);
+        gl.uniform1f(U(mainProg, 'uDiskInner'), 3.0);
+        gl.uniform1f(U(mainProg, 'uDiskOuter'), 11.0);
+        gl.uniform1f(U(mainProg, 'uDiskOpacity'), 0.62);
+        gl.uniform1f(U(mainProg, 'uDiskT'), 20000.0);
+        gl.uniform1f(U(mainProg, 'uExposure'), 1.0);
+        gl.uniform1i(U(mainProg, 'uSteps'), 100);
+        gl.uniform1f(U(mainProg, 'uDphi'), 0.03);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+        // pass 2 → 屏幕
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, 96, 64);
+        gl.useProgram(postProg);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.uniform1i(U(postProg, 'uScene'), 0);
+        gl.uniform2f(U(postProg, 'uRes'), 96, 64);
+        gl.uniform1f(U(postProg, 'uBloom'), 0.6);
+        gl.uniform1f(U(postProg, 'uThreshold'), 0.8);
+        gl.uniform1f(U(postProg, 'uExposure'), 0.9);
+        gl.uniform1f(U(postProg, 'uRipple'), frame > 4 ? 60.0 + frame * 8 : 0.0);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+        const e = gl.getError();
+        if (e !== gl.NO_ERROR) errs.push('frame' + frame + ':0x' + e.toString(16));
+      }
+      out.framesOk = errs.length === 0;
+      out.glError = errs.length ? errs.join(' ') : 'none';
+
+      // ── 读回像素，确认不是全黑 ──
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      const px = new Uint16Array(96 * 64 * 4);
+      gl.readPixels(0, 0, 96, 64, gl.RGBA, gl.HALF_FLOAT, px);
+      // 半精度浮点：粗略判断非零即可（不全黑就说明管线通了）
+      let mn = 65535, mx = 0, sum = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        const v = px[i] + px[i + 1] + px[i + 2];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+        sum += v;
+      }
+      out.pixelStats = { min: mn, max: mx, mean: Math.round(sum / (96 * 64)) };
+
+      // ── 把 pass 2 的输出（也就是真正上屏的那张图）读回来存成 base64 PNG ──
+      // 【为什么要这一步】前面只统计了 FBO 里场景 pass 的像素。
+      // 但我真正想看的是"**后处理之后最终上屏的画面**" —— 那才是我在浏览器里会看到的东西。
+      // 把它读回来存成 PNG，就能在无 GPU 的机器上**亲眼看一眼 GPU 路径画出了什么**，
+      // 而不是只看几个统计数字。
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      const px2 = new Uint8Array(96 * 64 * 4);
+      gl.readPixels(0, 0, 96, 64, gl.RGBA, gl.UNSIGNED_BYTE, px2);
+
+      // 手工组 PNG（readPixels 是自下而上的，行序要翻转）
+      const cv = document.createElement('canvas');
+      cv.width = 96; cv.height = 64;
+      const cx = cv.getContext('2d');
+      const idata = cx.createImageData(96, 64);
+      for (let y = 0; y < 64; y++) {
+        const src = (63 - y) * 96 * 4;
+        const dst = y * 96 * 4;
+        for (let x = 0; x < 96 * 4; x++) idata.data[dst + x] = px2[src + x];
+      }
+      cx.putImageData(idata, 0, 0);
+      out.screenPng = cv.toDataURL('image/png');
+      out.screenSize = '96x64';
+      out.screenMean = (() => {
+        let s = 0;
+        for (let i = 0; i < px2.length; i += 4) s += px2[i] + px2[i + 1] + px2[i + 2];
+        return Math.round(s / (96 * 64 * 3));
+      })();
+    }
+
+    mark('all-done');
+    out.log = '编译/链接/帧循环均已完成';
+    report(out.jsError ? 'error' : 'ok');
+  }
+} catch (e) {
+  out.jsError = String(e && e.stack ? e.stack : e).slice(0, 800);
+  report('error');
+}
+</script>
+</body>
+</html>

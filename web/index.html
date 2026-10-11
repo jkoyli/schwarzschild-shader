@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>史瓦西黑洞 · WebGL2 实时渲染</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #08090c; color: #d8dee9;
+    font: 13px/1.7 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; height: 100vh; overflow: hidden;
+  }
+  #stage { flex: 1 1 auto; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #side {
+    flex: 0 0 300px; overflow-y: auto; padding: 14px 16px;
+    background: #0d1016; border-left: 1px solid #1d222c;
+  }
+  h1 { font-size: 14px; margin: 0 0 4px; color: #e8eef8; font-weight: 600; }
+  .sub { font-size: 11px; color: #7b8698; margin-bottom: 14px; line-height: 1.5; }
+  .card { border: 1px solid #1d222c; background: #11151d; border-radius: 8px;
+          padding: 10px 12px; margin-bottom: 10px; }
+  .card h2 { font-size: 11px; margin: 0 0 8px; color: #8b96a8; font-weight: 600;
+             letter-spacing: .04em; }
+  label.row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  label.row span.k { flex: 0 0 84px; font-size: 11.5px; color: #8b96a8; }
+  label.row output { flex: 0 0 52px; text-align: right;
+                     font: 11px ui-monospace, Consolas, monospace; color: #a8b4c8; }
+  input[type=range] { flex: 1 1 auto; min-width: 0; accent-color: #4c9aff; }
+  .warn { font-size: 11px; color: #d8a657; line-height: 1.6; margin-top: 6px; }
+  .ok { color: #7fd88f; }
+  .bad { color: #ff7b72; }
+  #status { font: 11px ui-monospace, Consolas, monospace; color: #8b96a8; }
+  .kv { display: flex; justify-content: space-between; font-size: 11.5px;
+        font-family: ui-monospace, Consolas, monospace; color: #a8b4c8; }
+  button { width: 100%; padding: 7px; margin-top: 6px; cursor: pointer;
+           background: #1a2130; color: #d8dee9; border: 1px solid #2a3242;
+           border-radius: 6px; font-size: 12px; }
+  button:hover { border-color: #3d4859; }
+  #err { position: absolute; inset: 0; overflow: auto; padding: 16px;
+         background: #0d1016ee; display: none; white-space: pre-wrap;
+         font: 12px/1.6 ui-monospace, Consolas, monospace; color: #ff9b93; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <pre id="err"></pre>
+</div>
+
+<div id="side">
+  <h1>史瓦西黑洞 · 实时</h1>
+  <div class="sub">
+    测地线逐像素积分（u(φ) 形式，同样是从 CPU 参考渲染器验证过的方程，
+    弱场偏折收敛阶与临界碰撞参数都过了数值自检）。
+  </div>
+
+  <div class="card">
+    <h2>安全性（防 GPU 挂起）</h2>
+    <label class="row"><span class="k">分辨率</span>
+      <input type="range" id="scale" min="25" max="100" step="5" value="60">
+      <output id="scale_o">60%</output></label>
+    <label class="row"><span class="k">最大步数</span>
+      <input type="range" id="steps" min="60" max="600" step="20" value="240">
+      <output id="steps_o">240</output></label>
+    <label class="row"><span class="k">角步长</span>
+      <input type="range" id="dphi" min="1" max="8" step="1" value="3">
+      <output id="dphi_o">0.03</output></label>
+    <div class="warn" id="safeinfo"></div>
+  </div>
+
+  <div class="card">
+    <h2>相机</h2>
+    <label class="row"><span class="k">距离 (r_s)</span>
+      <input type="range" id="dist" min="8" max="90" step="1" value="40">
+      <output id="dist_o">40</output></label>
+    <label class="row"><span class="k">仰角 (°)</span>
+      <input type="range" id="elev" min="-60" max="60" step="1" value="9">
+      <output id="elev_o">9</output></label>
+    <label class="row"><span class="k">视场 (°)</span>
+      <input type="range" id="fov" min="12" max="80" step="1" value="42">
+      <output id="fov_o">42</output></label>
+  </div>
+
+  <div class="card">
+    <h2>吸积盘</h2>
+    <label class="row"><span class="k">外缘 (r_s)</span>
+      <input type="range" id="douter" min="5" max="30" step="0.5" value="11">
+      <output id="douter_o">11</output></label>
+    <label class="row"><span class="k">不透明度</span>
+      <input type="range" id="dop" min="0" max="1" step="0.02" value="0.62">
+      <output id="dop_o">0.62</output></label>
+    <label class="row"><span class="k">内缘温度</span>
+      <input type="range" id="dtemp" min="4000" max="30000" step="500" value="20000">
+      <output id="dtemp_o">20000</output></label>
+  </div>
+
+  <div class="card">
+    <h2>后处理</h2>
+    <label class="row"><span class="k">泛光</span>
+      <input type="range" id="bloom" min="0" max="1.5" step="0.05" value="0.6">
+      <output id="bloom_o">0.60</output></label>
+    <label class="row"><span class="k">曝光</span>
+      <input type="range" id="expo" min="0.1" max="3" step="0.05" value="0.9">
+      <output id="expo_o">0.90</output></label>
+    <label class="row"><span class="k">扩散环</span>
+      <input type="range" id="ripple" min="0" max="1" step="0.02" value="0">
+      <output id="ripple_o">0.00</output></label>
+  </div>
+
+  <div class="card">
+    <h2>状态</h2>
+    <div class="kv"><span>FPS</span><span id="fps">—</span></div>
+    <div class="kv"><span>渲染尺寸</span><span id="dims">—</span></div>
+    <div class="kv"><span>GPU</span><span id="gpu">—</span></div>
+    <div id="status">初始化中…</div>
+    <button id="toggle">暂停</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ═══════════════════════════════════════════════════════════════════════════
+//  GPU 侧
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 顶点着色器：全屏三角形，不需要任何 VBO（用 gl_VertexID 直接算坐标）
+const VS = `#version 300 es
+void main() {
+  // 三个顶点覆盖整个屏幕：(-1,-1) (3,-1) (-1,3)
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+// 主渲染片段着色器：逐像素追测地线
+//
+// 【安全设计 —— 这是写 GPU 光追最重要的事】
+// 所有循环都有**编译期常量上界**（MAX_STEPS / MAX_DISK_HITS），
+// 一个 `while(true)` 就足以让驱动超时（Windows TDR 默认 2 秒）并重置显卡，
+// 那是真的会黑屏、连累其他程序的事故。
+// 另外用 dither 让相邻像素的起始步长不同 —— 避免整个 warp 同时跑满，
+// 那是触发 TDR 的最常见原因。
+const FS_MAIN = `#version 300 es
+precision highp float;
+
+out vec4 fragColor;
+
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec3  uCamPos;
+uniform mat3  uCamBasis;   // 列: right, up, forward
+uniform float uHalfW;
+uniform float uHalfH;
+uniform float uPixelAngle;
+
+uniform float uDiskInner;
+uniform float uDiskOuter;
+uniform float uDiskOpacity;
+uniform float uDiskT;
+uniform float uExposure;
+uniform int   uSteps;       // 步数上限，由 UI 控制（防 TDR 的第二道阀门）
+uniform float uDphi;        // 角步长基准值
+
+// ⚠ MAX_STEPS 必须是**编译期常量** —— WebGL2/ESSL 3.00 要求 for 的循环上界
+// 在编译期可知。桌面 GL 3.2 允许动态上界，但 WebGL2 不行，写错就编译不过。
+// 所以做法是：用常量上界 + 在循环体内用 uniform 提前 break。
+// 这样既有常量上界（编译通过），又能让 UI 真正控制步数（防 TDR）。
+#define MAX_STEPS 512
+#define MAX_DISK_HITS 6
+
+const float RS = 1.0;
+const float PI = 3.14159265359;
+
+// ── 哈希与噪声（星场用；纯整数运算，无纹理依赖）─────────────────────────
+float hash3i(ivec3 p) {
+  int n = p.x * 73856093 ^ p.y * 19349663 ^ p.z * 83492791;
+  n = (n ^ (n >> 13)) * 1274126177;
+  n = n ^ (n >> 16);
+  return float(n & 0x7FFFFFFF) / float(0x7FFFFFFF);
+}
+
+// ── 黑体色（Tanner Helland 分段拟合；与 CPU 版同一套公式）───────────────
+vec3 blackbody(float tempK) {
+  float t = clamp(tempK, 1000.0, 40000.0) / 100.0;
+  float r, g, b;
+  if (t <= 66.0) r = 255.0;
+  else r = 329.698727446 * pow(t - 60.0, -0.1332047592);
+
+  if (t <= 66.0) g = 99.4708025861 * log(t) - 161.1195681661;
+  else g = 288.1221695283 * pow(t - 60.0, -0.0755148492);
+
+  if (t >= 66.0) b = 255.0;
+  else if (t <= 19.0) b = 0.0;
+  else b = 138.5177312231 * log(t - 10.0) - 305.0447927307;
+
+  return clamp(vec3(r, g, b) / 255.0, 0.0, 1.0);
+}
+
+// ── 星场 ─────────────────────────────────────────────────────────────────
+// 用单位方向之间的**夹角**衡量星的远近，而不是屏幕距离 ——
+// 这样星的大小与分辨率无关（CPU 版在这里错过两次，教训写在 render.py 里）。
+vec3 starfield(vec3 d, float pixelAngle) {
+  vec3 ad = abs(d);
+  vec2 uv; int face;
+  if (ad.x >= ad.y && ad.x >= ad.z) { uv = d.yz / ad.x; face = d.x > 0.0 ? 0 : 1; }
+  else if (ad.y >= ad.z)            { uv = d.xz / ad.y; face = d.y > 0.0 ? 2 : 3; }
+  else                              { uv = d.xy / ad.z; face = d.z > 0.0 ? 4 : 5; }
+
+  // 银河带（低频，别用高频正弦 —— 那会变成"隐约的斑块"）
+  float band = exp(-(d.y * d.y) / (2.0 * 0.16 * 0.16));
+  float tex = 0.62 + 0.38 * sin(d.x * 1.35 + 0.7) * sin(d.z * 1.15 - 1.1);
+  float base = band * tex * 0.020;
+  vec3 col = vec3(base * 0.66, base * 0.74, base * 1.0);
+
+  // 两层星：亮星稀疏、暗星密集
+  for (int layer = 0; layer < 2; ++layer) {
+    float grid = (layer == 0) ? 70.0 : 190.0;
+    float dens = (layer == 0) ? 0.14 : 0.22;
+    float maxamp = (layer == 0) ? 6.0 : 0.30;
+    float rad = (layer == 0) ? 0.58 : 0.50;
+
+    ivec2 g = ivec2(floor((uv + 1.0) * 0.5 * grid));
+    if (hash3i(ivec3(g, face + layer * 517)) >= dens) continue;
+
+    vec2 s = vec2(hash3i(ivec3(g, face + 101 + layer * 13)),
+                  hash3i(ivec3(g, face + 202 + layer * 13)));
+    // 把「面 UV + 格内偏移」还原成单位方向
+    vec2 f = ((vec2(g) + s) / grid) * 2.0 - 1.0;
+    vec3 sd;
+    if (face == 0)      sd = vec3( 1.0, f.x, f.y);
+    else if (face == 1) sd = vec3(-1.0, f.x, f.y);
+    else if (face == 2) sd = vec3(f.x,  1.0, f.y);
+    else if (face == 3) sd = vec3(f.x, -1.0, f.y);
+    else if (face == 4) sd = vec3(f.x, f.y,  1.0);
+    else                sd = vec3(f.x, f.y, -1.0);
+    sd = normalize(sd);
+
+    float sinTheta = length(cross(d, sd));       // = sin(夹角)
+    float sigma = pixelAngle * rad;
+    float core = exp(-(sinTheta * sinTheta) / (2.0 * sigma * sigma));
+    if (core < 3e-3) continue;
+
+    float amp = hash3i(ivec3(g, face + 303 + layer * 13));
+    amp = amp * amp * amp;                        // 帕累托：少数亮星 + 大量暗星
+    float tm = hash3i(ivec3(g, face + 404 + layer * 13));
+    vec3 sc = vec3(1.0 - 0.45 * tm, 1.0 - 0.10 * abs(tm - 0.5) * 2.0, 0.70 + 0.45 * tm);
+    col += sc * core * (0.12 + 0.88 * amp) * maxamp;
+  }
+  return col;
+}
+
+// ── 测地线一步（RK4）────────────────────────────────────────────────────
+// u'' = 1.5u² - u    ← 这就是那句"不用写广义相对论"的全部内容
+void rk4(inout float u, inout float w, float dphi) {
+  float k1u = w,                       k1w = 1.5 * u * u - u;
+  float u2 = u + 0.5 * dphi * k1u,     w2 = w + 0.5 * dphi * k1w;
+  float k2u = w2,                      k2w = 1.5 * u2 * u2 - u2;
+  float u3 = u + 0.5 * dphi * k2u,     w3 = w + 0.5 * dphi * k2w;
+  float k3u = w3,                      k3w = 1.5 * u3 * u3 - u3;
+  float u4 = u + dphi * k3u,           w4 = w + dphi * k3w;
+  float k4u = w4,                      k4w = 1.5 * u4 * u4 - u4;
+  u += (dphi / 6.0) * (k1u + 2.0 * k2u + 2.0 * k3u + k4u);
+  w += (dphi / 6.0) * (k1w + 2.0 * k2w + 2.0 * k3w + k4w);
+}
+
+void main() {
+  vec2 fc = gl_FragCoord.xy;
+  // 归一化到 [-1,1]，y 向上
+  float sx = (fc.x / uRes.x * 2.0 - 1.0) * uHalfW;
+  float sy = (fc.y / uRes.y * 2.0 - 1.0) * uHalfH;
+
+  vec3 dir = normalize(uCamBasis * vec3(sx, sy, 1.0));
+  vec3 p = uCamPos;
+  float R = length(p);
+
+  // 碰撞参数 b = |r × v|
+  float b = length(cross(p, dir));
+  if (b < 1e-5) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+
+  // 轨道平面基：e1 指向相机，e2 垂直于 e1 且落在平面内
+  vec3 e1 = p / R;
+  vec3 bn = cross(p, dir) / b;
+  vec3 e2 = normalize(cross(bn, e1));
+
+  float u = 0.0;
+  float w = 1.0 / b;
+  float phi = 0.0;
+
+  // 【抖动】让相邻像素的角步长略有不同。
+  // 目的不是抗锯齿，而是**避免整屏像素在同一时刻跑满循环** ——
+  // 同步的峰值电流是触发 TDR 的头号原因。
+  float dither = hash3i(ivec3(ivec2(fc), 7)) * 0.35;
+  float dphi = uDphi * (1.0 + dither);
+
+  vec3 color = vec3(0.0);
+  float transmit = 1.0;
+  vec3 prevPt = e1 * R;
+  int diskHits = 0;
+
+  for (int i = 0; i < MAX_STEPS; ++i) {
+    // 用 uniform 提前收尾：常量上界保证能编译，uniform 保证 UI 能控制
+    // 真实步数（从而控制 GPU 时间）。
+    if (i >= uSteps) break;
+    if (phi > 40.0) break;
+
+    rk4(u, w, dphi);
+    phi += dphi;
+
+    if (u >= 1.0 / RS) {                 // 落进视界
+      break;
+    }
+
+    if (u <= 0.0) {                      // 逃逸到无穷远 → 采样星空（引力透镜的效果就在这）
+      vec3 vdir = -sin(phi) * e1 + cos(phi) * e2;
+      color += transmit * starfield(normalize(vdir), uPixelAngle);
+      transmit = 0.0;
+      break;
+    }
+
+    float r = 1.0 / u;
+    vec3 pt = (cos(phi) * e1 + sin(phi) * e2) * r;
+
+    // 跨赤道面检测 → 采一次吸积盘
+    if (prevPt.y * pt.y < 0.0 && diskHits < MAX_DISK_HITS) {
+      float t = prevPt.y / (prevPt.y - pt.y);
+      vec3 hit = mix(prevPt, pt, t);
+      float rh = length(hit);
+      if (rh >= uDiskInner && rh <= uDiskOuter) {
+        diskHits++;
+        float phiW = atan(hit.z, hit.x);
+
+        // 温度剖面 T ∝ r^(-3/4)
+        float tEmit = uDiskT * pow(rh / uDiskInner, -0.75);
+
+        // 开普勒速度 + 多普勒
+        float vOrb = sqrt(0.5 / max(rh, 1.0001));
+        vec3 tang = vec3(-sin(phiW), 0.0, cos(phiW));
+        vec3 photonOut = -normalize(-sin(phi) * e1 + cos(phi) * e2);
+        float cosT = dot(tang, photonOut);
+        float beta = min(0.95, vOrb);
+        float gamma = 1.0 / sqrt(max(1e-6, 1.0 - beta * beta));
+        float doppler = 1.0 / (gamma * (1.0 - beta * cosT));
+
+        // 引力红移
+        float grav = sqrt(max(1e-6, 1.0 - RS / rh));
+        float tObs = tEmit * doppler * grav;
+
+        float bright = pow(tEmit / uDiskT, 1.0) * pow(doppler, 3.0) * 0.35;
+        vec3 emis = blackbody(tObs) * bright;
+
+        color += transmit * uDiskOpacity * emis;
+        transmit *= (1.0 - uDiskOpacity);
+        if (transmit < 0.01) break;
+      }
+    }
+    prevPt = pt;
+  }
+
+  fragColor = vec4(max(color, 0.0) * uExposure, 1.0);
+}`;
+
+// 后处理：亮度提取 → 降采样模糊 → 合成 → 扩散环 → ACES → gamma
+const FS_POST = `#version 300 es
+precision highp float;
+
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform vec2  uRes;
+uniform float uBloom;
+uniform float uThreshold;
+uniform float uExposure;
+uniform float uRipple;      // 扩散环半径（0 = 关闭）；用 -1 表示不加
+
+#define BLUR_TAPS 9
+
+vec3 sampleScene(vec2 uv) { return texture(uScene, uv).rgb; }
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 c = sampleScene(uv);
+
+  // ── 泛光：亮部提取 + 可分离近似的圆环采样 ──
+  if (uBloom > 0.0) {
+    vec2 texel = 1.0 / uRes;
+    vec3 bright = vec3(0.0);
+    float wsum = 0.0;
+    // 只做一次中等半径的环形采样：9 个 tap，方向均匀分布
+    // （正式做法是多级 mip 链，但那需要 FBO；这里为了单文件可运行做了简化，
+    //   效果上"大范围柔光"会弱一些，"局部亮核溢出"是有的）
+    for (int i = 0; i < BLUR_TAPS; ++i) {
+      float a = float(i) / float(BLUR_TAPS) * 6.2831853;
+      vec2 off = vec2(cos(a), sin(a)) * texel * 14.0;
+      vec3 s = sampleScene(uv + off);
+      float lum = dot(s, vec3(0.3333));
+      float w = smoothstep(uThreshold - 0.15, uThreshold + 0.15, lum);
+      bright += s * w;
+      wsum += w;
+    }
+    bright /= max(wsum, 1.0);
+    c += bright * uBloom;
+  }
+
+  // ── 元素视野式向外扩散环 ──
+  // 波前扫过处把采样位置沿半径**往外**推，并给环本身加一圈青蓝高光。
+  if (uRipple > 0.0) {
+    vec2 d = (gl_FragCoord.xy - uRes * 0.5);
+    float r = length(d);
+    float width = 14.0;
+    float gMain  = exp(-pow(r - uRipple, 2.0) / (2.0 * pow(width * 0.5, 2.0)));
+    float gTrail = exp(-pow(r - (uRipple - width * 1.15), 2.0) / (2.0 * pow(width * 0.9, 2.0)));
+    float profile = gMain - 0.55 * gTrail;
+
+    vec2 u2 = d / max(r, 1e-4);
+    vec2 off = u2 * profile * 8.0 / uRes;
+    vec3 warped;
+    warped.r = sampleScene(uv - off * 1.0).r;
+    warped.g = sampleScene(uv - off * 1.15).g;
+    warped.b = sampleScene(uv - off * 1.30).b;
+    c = warped;
+
+    c += vec3(0.55, 0.85, 1.00) * gMain * 0.30;
+    c += vec3(0.85, 0.60, 0.30) * max(gTrail, 0.0) * 0.10;
+  }
+
+  // ── 色调映射（ACES 近似）+ gamma ──
+  vec3 x = c * uExposure;
+  x = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+  x = pow(x, vec3(1.0 / 2.2));
+  fragColor = vec4(x, 1.0);
+}`;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  宿主侧
+// ═══════════════════════════════════════════════════════════════════════════
+const canvas = document.getElementById('gl');
+const errBox = document.getElementById('err');
+const gl = canvas.getContext('webgl2', { antialias: false, depth: false,
+                                          preserveDrawingBuffer: false });
+
+function fail(msg) {
+  errBox.style.display = 'block';
+  errBox.textContent = msg;
+  document.getElementById('status').innerHTML = '<span class="bad">着色器未通过</span>';
+}
+
+if (!gl) {
+  fail('这个浏览器/显卡不支持 WebGL2。\n请用较新的 Edge / Chrome。');
+} else {
+  boot();
+}
+
+function compile(type, src, label) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(sh);
+    // 把出错行号和源码一起打出来 —— 这是排查 GLSL 唯一有效的手段
+    const lines = src.split('\n');
+    let ctx = '';
+    const m = /:(\d+):/.exec(log || '');
+    if (m) {
+      const n = parseInt(m[1], 10);
+      for (let i = Math.max(0, n - 4); i < Math.min(lines.length, n + 3); i++) {
+        ctx += (i + 1 === n ? '>> ' : '   ') + (i + 1) + ': ' + lines[i] + '\n';
+      }
+    }
+    throw new Error('[' + label + '] 编译失败\n' + log + '\n' + ctx);
+  }
+  return sh;
+}
+
+function link(vsSrc, fsSrc, label, attribs) {
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc, label + '.vert'));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc, label + '.frag'));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error('[' + label + '] 链接失败\n' + gl.getProgramInfoLog(prog));
+  }
+  const u = {};
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(prog, i);
+    u[info.name.replace('[0]', '')] = gl.getUniformLocation(prog, info.name);
+  }
+  return { prog, u };
+}
+
+function boot() {
+  let mainProg, postProg;
+  try {
+    mainProg = link(VS, FS_MAIN, 'main');
+    postProg = link(VS, FS_POST, 'post');
+  } catch (e) {
+    fail(String(e.message || e));
+    return;
+  }
+
+  // 两个 FBO：场景渲染到纹理，再后处理到屏幕
+  const fbo = { tex: null, fb: null, w: 0, h: 0 };
+  function ensureFBO(w, h) {
+    if (fbo.w === w && fbo.h === h) return;
+    if (fbo.tex) gl.deleteTexture(fbo.tex);
+    if (fbo.fb) gl.deleteFramebuffer(fbo.fb);
+    fbo.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, fbo.tex);
+    // RGBA16F：给泛光留出 1.0 以上的余量，否则加性叠加会被截断在 1.0
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    fbo.fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fbo.tex, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      fail('浮点帧缓冲创建失败（RGBA16F 不受支持）。');
+      return;
+    }
+    fbo.w = w; fbo.h = h;
+  }
+
+  // 全屏三角形，不需要任何顶点缓冲
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const el = (id) => document.getElementById(id);
+  const P = {
+    scale: el('scale'), steps: el('steps'), dphi: el('dphi'),
+    dist: el('dist'), elev: el('elev'), fov: el('fov'),
+    douter: el('douter'), dop: el('dop'), dtemp: el('dtemp'),
+    bloom: el('bloom'), expo: el('expo'), ripple: el('ripple'),
+  };
+  const OUT = {
+    scale: el('scale_o'), steps: el('steps_o'), dphi: el('dphi_o'),
+    dist: el('dist_o'), elev: el('elev_o'), fov: el('fov_o'),
+    douter: el('douter_o'), dop: el('dop_o'), dtemp: el('dtemp_o'),
+    bloom: el('bloom_o'), expo: el('expo_o'), ripple: el('ripple_o'),
+  };
+
+  function syncOutputs() {
+    OUT.scale.textContent = P.scale.value + '%';
+    OUT.steps.textContent = P.steps.value;
+    OUT.dphi.textContent = (P.dphi.value / 100).toFixed(2);
+    OUT.dist.textContent = P.dist.value;
+    OUT.elev.textContent = P.elev.value;
+    OUT.fov.textContent = P.fov.value;
+    OUT.douter.textContent = P.douter.value;
+    OUT.dop.textContent = parseFloat(P.dop.value).toFixed(2);
+    OUT.dtemp.textContent = P.dtemp.value;
+    OUT.bloom.textContent = parseFloat(P.bloom.value).toFixed(2);
+    OUT.expo.textContent = parseFloat(P.expo.value).toFixed(2);
+    OUT.ripple.textContent = parseFloat(P.ripple.value).toFixed(2);
+
+    const w = parseInt(P.scale.value, 10);
+    const steps = parseInt(P.steps.value, 10);
+    // 估算"最坏情况"的积分次数，给用户一个量化的风险提示
+    const px = Math.round(canvas.width * w / 100) * Math.round(canvas.height * w / 100);
+    const budget = px * steps;
+    const level = budget > 3e8 ? 'bad' : (budget > 1.2e8 ? 'warn' : 'ok');
+    const label = level === 'bad' ? '偏高，建议降分辨率' :
+                  (level === 'warn' ? '中等' : '安全');
+    el('safeinfo').innerHTML =
+      '最坏积分量 ≈ ' + (budget / 1e6).toFixed(0) + 'M 次　' +
+      '<span class="' + level + '">' + label + '</span>' +
+      '<br>（步数滑块只是上限；实际步数由角步长与光线是否逃逸决定）';
+  }
+
+  Object.values(P).forEach((s) => s.addEventListener('input', syncOutputs));
+  syncOutputs();
+
+  el('gpu').textContent = (() => {
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    return dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '（隐藏）';
+  })();
+
+  let playing = true;
+  el('toggle').addEventListener('click', () => {
+    playing = !playing;
+    el('toggle').textContent = playing ? '暂停' : '继续';
+  });
+
+  // 相机基：与 CPU 版 camera_basis 保持一致
+  // 相机位于 (R·cosθ, R·sinθ, 0)，看向原点（黑洞中心）。
+  // 返回列主序 mat3（列 = right, up, forward），因为 GLSL 里 mat3 * vec3 是按列组合的。
+  function cameraBasis(dist, elevDeg) {
+    const e = elevDeg * Math.PI / 180;
+    const pos = [dist * Math.cos(e), dist * Math.sin(e), 0];
+
+    const L = Math.hypot(pos[0], pos[1], pos[2]);
+    const fwd = [-pos[0] / L, -pos[1] / L, -pos[2] / L];
+
+    // right = normalize(cross(fwd, worldUp))，worldUp = (0,1,0)
+    const WU = [0, 1, 0];
+    let right = [
+      fwd[1] * WU[2] - fwd[2] * WU[1],
+      fwd[2] * WU[0] - fwd[0] * WU[2],
+      fwd[0] * WU[1] - fwd[1] * WU[0],
+    ];
+    const rl = Math.hypot(right[0], right[1], right[2]);
+    if (rl < 1e-9) { right = [1, 0, 0]; }        // 正对极轴时的退化处理
+    else { right = [right[0] / rl, right[1] / rl, right[2] / rl]; }
+
+    // up = cross(right, fwd)
+    const up = [
+      right[1] * fwd[2] - right[2] * fwd[1],
+      right[2] * fwd[0] - right[0] * fwd[2],
+      right[0] * fwd[1] - right[1] * fwd[0],
+    ];
+
+    // 列主序：前三个数是第一列（right），依此类推
+    return {
+      pos,
+      m: new Float32Array([
+        right[0], right[1], right[2],
+        up[0], up[1], up[2],
+        fwd[0], fwd[1], fwd[2],
+      ]),
+    };
+  }
+
+  // ── 看门狗 ──
+  // 如果一帧超过 WATCHDOG_MS 还没画完，就自动降分辨率。
+  // 这是防 TDR 的最后一道保险：宁可画面糊一点，也不能让驱动被重置。
+  const WATCHDOG_MS = 400;
+  let slowFrames = 0;
+  let frames = 0, fpsT = performance.now(), fpsVal = 0;
+
+  function draw(now) {
+    if (!playing) { requestAnimationFrame(draw); return; }
+
+    const scalePct = parseInt(P.scale.value, 10);
+    // 渲染分辨率 = 画布尺寸 × 缩放。这是防 TDR 的**第一手段**：
+    // 光追是填充率瓶颈，像素数直接决定 GPU 时间。
+    const rw = Math.max(64, Math.round(canvas.width * scalePct / 100));
+    const rh = Math.max(64, Math.round(canvas.height * scalePct / 100));
+    ensureFBO(rw, rh);
+    if (!fbo.fb) { requestAnimationFrame(draw); return; }
+
+    const dist = parseFloat(P.dist.value);
+    const elev = parseFloat(P.elev.value);
+    const fov = parseFloat(P.fov.value);
+    const cam = cameraBasis(dist, elev);
+    const halfH = Math.tan(fov * Math.PI / 360);
+    const halfW = halfH * (canvas.width / canvas.height);
+
+    const t0 = performance.now();
+
+    // pass 1：场景 → FBO
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo.fb);
+    gl.viewport(0, 0, rw, rh);
+    gl.useProgram(mainProg.prog);
+    gl.uniform2f(mainProg.u.uRes, rw, rh);
+    gl.uniform1f(mainProg.u.uTime, now * 0.001);
+    gl.uniform3fv(mainProg.u.uCamPos, new Float32Array(cam.pos));
+    gl.uniformMatrix3fv(mainProg.u.uCamBasis, false, cam.m);
+    gl.uniform1f(mainProg.u.uHalfW, halfW);
+    gl.uniform1f(mainProg.u.uHalfH, halfH);
+    gl.uniform1f(mainProg.u.uPixelAngle, (fov * Math.PI / 180) / rh);
+    gl.uniform1f(mainProg.u.uDiskInner, 3.0);
+    gl.uniform1f(mainProg.u.uDiskOuter, parseFloat(P.douter.value));
+    gl.uniform1f(mainProg.u.uDiskOpacity, parseFloat(P.dop.value));
+    gl.uniform1f(mainProg.u.uDiskT, parseFloat(P.dtemp.value));
+    gl.uniform1f(mainProg.u.uExposure, 1.0);
+    gl.uniform1i(mainProg.u.uSteps, parseInt(P.steps.value, 10));
+    gl.uniform1f(mainProg.u.uDphi, parseInt(P.dphi.value, 10) / 100.0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // pass 2：后处理 → 屏幕
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(postProg.prog);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fbo.tex);
+    gl.uniform1i(postProg.u.uScene, 0);
+    gl.uniform2f(postProg.u.uRes, canvas.width, canvas.height);
+    gl.uniform1f(postProg.u.uBloom, parseFloat(P.bloom.value));
+    gl.uniform1f(postProg.u.uThreshold, 0.8);
+    gl.uniform1f(postProg.u.uExposure, parseFloat(P.expo.value));
+    // 扩散环自动扩张：从中心涨到覆盖全屏再重来
+    const rp = parseFloat(P.ripple.value);
+    if (rp > 0) {
+      const period = 2600;
+      const cycle = ((now % period) / period);
+      const maxR = Math.hypot(canvas.width, canvas.height) * 0.55;
+      gl.uniform1f(postProg.u.uRipple, Math.max(1.0, cycle * maxR));
+    } else {
+      gl.uniform1f(postProg.u.uRipple, 0.0);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    const dt = performance.now() - t0;
+    frames++;
+    if (now - fpsT > 500) {
+      fpsVal = Math.round(frames * 1000 / (now - fpsT));
+      frames = 0; fpsT = now;
+      el('fps').textContent = fpsVal;
+      el('dims').textContent = rw + '×' + rh;
+    }
+    if (dt > WATCHDOG_MS) {
+      slowFrames++;
+      if (slowFrames >= 3) {
+        // 连续三帧过慢 → 自动把分辨率降一档
+        const next = Math.max(25, scalePct - 10);
+        if (next < scalePct) {
+          P.scale.value = String(next);
+          syncOutputs();
+          el('status').innerHTML = '<span class="warn">看门狗：自动降到 ' + next + '%</span>';
+          slowFrames = 0;
+        }
+      }
+    } else {
+      slowFrames = 0;
+    }
+
+    requestAnimationFrame(draw);
+  }
+
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.max(320, Math.round(r.width * dpr));
+    canvas.height = Math.max(200, Math.round(r.height * dpr));
+    syncOutputs();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  el('status').textContent = '就绪';
+  requestAnimationFrame(draw);
+}
+</script>
+</body>
+</html>
